@@ -1,4 +1,4 @@
-name: dev-deploy (ACA)
+name: dev-deploy (ACA FULL AUTO)
 
 on:
   push:
@@ -21,6 +21,7 @@ env:
   CAE_ENV: ${{ vars.CAE_ENV }}
   INGRESS_TYPE: ${{ vars.INGRESS_TYPE }}
   APP_PORT: ${{ vars.APP_PORT }}
+  LOCATION: eastus
 
 jobs:
 
@@ -28,7 +29,6 @@ jobs:
 # BUILD JOB
 # ==========================
   build:
-    name: Build & Push Image
     runs-on: ubuntu-latest
     environment: master
 
@@ -40,29 +40,24 @@ jobs:
 
     - name: Debug Secrets
       run: |
-        echo "AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID != '' }}"
-        echo "AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID != '' }}"
-        echo "AZURE_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID != '' }}"
+        echo "CLIENT_ID=${{ secrets.AZURE_CLIENT_ID != '' }}"
+        echo "TENANT_ID=${{ secrets.AZURE_TENANT_ID != '' }}"
+        echo "SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID != '' }}"
 
     - name: Clean Workspace
-      run: |
-        rm -rf * .[^.]* || true
+      run: rm -rf * .[^.]* || true
 
-    - name: Checkout Code
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-    - name: Azure Login (OIDC)
+    - name: Azure Login
       uses: azure/login@v2
       with:
         client-id: ${{ secrets.AZURE_CLIENT_ID }}
         tenant-id: ${{ secrets.AZURE_TENANT_ID }}
         subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-    - name: Compute Image Tag
-      id: tag
-      run: |
-        TAG=${GITHUB_SHA::7}
-        echo "TAG=$TAG" >> $GITHUB_ENV
+    - name: Compute Tag
+      run: echo "TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
 
     - name: Get ACR Login Server
       id: acr
@@ -71,27 +66,22 @@ jobs:
         echo "LOGIN_SERVER=$LOGIN_SERVER" >> $GITHUB_ENV
         echo "LOGIN_SERVER=$LOGIN_SERVER" >> $GITHUB_OUTPUT
 
-    - name: Define Image Name
+    - name: Set Image Name
       id: set-image
       run: |
         IMAGE=$LOGIN_SERVER/$ACR_REPO:$TAG
         echo "IMAGE=$IMAGE" >> $GITHUB_ENV
         echo "IMAGE=$IMAGE" >> $GITHUB_OUTPUT
 
-    - name: Login to ACR
+    - name: ACR Login
       run: az acr login --name $ACR_NAME
 
-    - name: Setup Docker Buildx
-      uses: docker/setup-buildx-action@v3
+    - uses: docker/setup-buildx-action@v3
 
-    - name: Build Docker Image
-      run: |
-        docker buildx build \
-          --platform linux/amd64 \
-          --load \
-          -t $IMAGE .
+    - name: Build Image
+      run: docker buildx build --platform linux/amd64 --load -t $IMAGE .
 
-    - name: Push Docker Image
+    - name: Push Image
       run: docker push $IMAGE
 
 
@@ -99,21 +89,86 @@ jobs:
 # DEPLOY JOB
 # ==========================
   deploy:
-    name: Deploy to ACA
     runs-on: ubuntu-latest
     needs: build
     environment: master
 
     steps:
 
-    - name: Azure Login (OIDC)
+    - name: Azure Login
       uses: azure/login@v2
       with:
         client-id: ${{ secrets.AZURE_CLIENT_ID }}
         tenant-id: ${{ secrets.AZURE_TENANT_ID }}
         subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-    - name: Ensure Container App Exists
+# --------------------------
+# INFRA SETUP
+# --------------------------
+    - name: Ensure Resource Group
+      run: |
+        az group create --name $RG_ENV --location $LOCATION
+
+    - name: Ensure Log Analytics Workspace
+      run: |
+        LAW_NAME="${APP_NAME}-logs"
+
+        EXISTS=$(az monitor log-analytics workspace show \
+          --resource-group $RG_ENV \
+          --workspace-name $LAW_NAME \
+          --query name -o tsv 2>/dev/null || echo "")
+
+        if [ -z "$EXISTS" ]; then
+          echo "Creating Workspace..."
+          az monitor log-analytics workspace create \
+            --resource-group $RG_ENV \
+            --workspace-name $LAW_NAME \
+            --location $LOCATION
+        else
+          echo "Workspace exists"
+        fi
+
+    - name: Get Workspace Details
+      id: law
+      run: |
+        LAW_NAME="${APP_NAME}-logs"
+
+        LAW_ID=$(az monitor log-analytics workspace show \
+          --resource-group $RG_ENV \
+          --workspace-name $LAW_NAME \
+          --query customerId -o tsv)
+
+        LAW_KEY=$(az monitor log-analytics workspace get-shared-keys \
+          --resource-group $RG_ENV \
+          --workspace-name $LAW_NAME \
+          --query primarySharedKey -o tsv)
+
+        echo "LAW_ID=$LAW_ID" >> $GITHUB_ENV
+        echo "LAW_KEY=$LAW_KEY" >> $GITHUB_ENV
+
+    - name: Ensure Container App Environment
+      run: |
+        EXISTS=$(az containerapp env show \
+          --name $CAE_ENV \
+          --resource-group $RG_ENV \
+          --query name -o tsv 2>/dev/null || echo "")
+
+        if [ -z "$EXISTS" ]; then
+          echo "Creating CAE..."
+          az containerapp env create \
+            --name $CAE_ENV \
+            --resource-group $RG_ENV \
+            --location $LOCATION \
+            --logs-workspace-id $LAW_ID \
+            --logs-workspace-key $LAW_KEY
+        else
+          echo "CAE exists"
+        fi
+
+# --------------------------
+# APP DEPLOYMENT
+# --------------------------
+    - name: Ensure Container App
       run: |
         EXISTS=$(az containerapp show \
           --name $APP_NAME \
@@ -134,7 +189,7 @@ jobs:
             --registry-server ${{ needs.build.outputs.LOGIN_SERVER }} \
             --system-assigned
         else
-          echo "Container App already exists"
+          echo "App exists"
         fi
 
     - name: Assign AcrPull Role
@@ -149,9 +204,9 @@ jobs:
         az role assignment create \
           --assignee $PRINCIPAL_ID \
           --role AcrPull \
-          --scope $ACR_ID || echo "Role already exists"
+          --scope $ACR_ID || echo "Role exists"
 
-    - name: Configure Container App Registry
+    - name: Configure Registry
       run: |
         az containerapp registry set \
           --name $APP_NAME \
@@ -159,14 +214,14 @@ jobs:
           --server ${{ needs.build.outputs.LOGIN_SERVER }} \
           --identity system
 
-    - name: Deploy New Image
+    - name: Deploy Image
       run: |
         az containerapp update \
           --name $APP_NAME \
           --resource-group $RG_ENV \
           --image ${{ needs.build.outputs.IMAGE }}
 
-    - name: Show Deployment Status
+    - name: Show Status
       run: |
         az containerapp show \
           --name $APP_NAME \
