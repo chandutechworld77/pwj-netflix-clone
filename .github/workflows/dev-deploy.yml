@@ -80,7 +80,7 @@ jobs:
     name: Build & Push Image
     runs-on: ubuntu-latest
     needs: llm-evaluate
-    environment: master
+    
 
     outputs:
       IMAGE: ${{ steps.set-image.outputs.IMAGE }}
@@ -142,7 +142,7 @@ jobs:
     name: Deploy to ACA
     runs-on: ubuntu-latest
     needs: build
-    environment: master
+    
     
 
     steps:
