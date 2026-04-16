@@ -142,7 +142,7 @@ jobs:
     name: Deploy to ACA
     runs-on: ubuntu-latest
     needs: build
-    environment: master
+    
 
     steps:
 
