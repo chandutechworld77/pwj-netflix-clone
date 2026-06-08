@@ -44,21 +44,16 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Verify AWS Login
-        run: aws sts get-caller-identity
-
-      - name: Ensure ECR Repository Exists
         run: |
-          if aws ecr describe-repositories \
-            --repository-names "$ECR_REPOSITORY" \
-            --region "$AWS_REGION" >/dev/null 2>&1; then
-            echo "ECR exists"
-          else
-            echo "Creating ECR..."
-            aws ecr create-repository \
-              --repository-name "$ECR_REPOSITORY" \
-              --image-scanning-configuration scanOnPush=true \
-              --region "$AWS_REGION"
-          fi
+          aws sts get-caller-identity
+
+      - name: Test AWS Access
+        run: |
+          echo "===== ECR ====="
+          aws ecr describe-repositories
+
+          echo "===== ECS CLUSTERS ====="
+          aws ecs list-clusters
 
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
@@ -76,13 +71,13 @@ jobs:
       - name: Tag Docker Image
         run: |
           docker tag \
-          $ECR_REPOSITORY:${{ steps.image.outputs.image_tag }} \
-          $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:${{ steps.image.outputs.image_tag }}
+            $ECR_REPOSITORY:${{ steps.image.outputs.image_tag }} \
+            $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:${{ steps.image.outputs.image_tag }}
 
       - name: Push Docker Image
         run: |
           docker push \
-          $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:${{ steps.image.outputs.image_tag }}
+            $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:${{ steps.image.outputs.image_tag }}
 
   deploy:
     name: Deploy to ECS
@@ -102,28 +97,26 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Verify AWS Login
-        run: aws sts get-caller-identity
-
-      - name: Ensure ECS Cluster Exists
         run: |
-          STATUS=$(aws ecs describe-clusters \
-            --clusters "$ECS_CLUSTER" \
-            --query "clusters[0].status" \
-            --output text 2>/dev/null || echo "MISSING")
-
-          if [ "$STATUS" = "ACTIVE" ]; then
-            echo "Cluster exists"
-          else
-            echo "Creating ECS Cluster..."
-            aws ecs create-cluster \
-              --cluster-name "$ECS_CLUSTER" \
-              --region "$AWS_REGION"
-          fi
+          aws sts get-caller-identity
 
       - name: Verify Task Definition File
         run: |
           if [ ! -f "$TASK_DEFINITION_FILE" ]; then
             echo "Task definition file not found"
+            exit 1
+          fi
+
+      - name: Verify ECS Service Exists
+        run: |
+          STATUS=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --query "services[0].status" \
+            --output text)
+
+          if [ "$STATUS" != "ACTIVE" ]; then
+            echo "ECS Service not found."
             exit 1
           fi
 
@@ -134,20 +127,6 @@ jobs:
           task-definition: ${{ env.TASK_DEFINITION_FILE }}
           container-name: ${{ env.CONTAINER_NAME }}
           image: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ needs.build.outputs.image_tag }}
-
-      - name: Verify ECS Service Exists
-        run: |
-          STATUS=$(aws ecs describe-services \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_SERVICE" \
-            --query "services[0].status" \
-            --output text 2>/dev/null || echo "MISSING")
-
-          if [ "$STATUS" != "ACTIVE" ]; then
-            echo "ECS Service not found."
-            echo "Create the ECS Service once before deploying."
-            exit 1
-          fi
 
       - name: Deploy to Amazon ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
