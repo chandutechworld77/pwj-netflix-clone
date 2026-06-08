@@ -3,7 +3,7 @@ name: deploy-nodejs-ecs-fargate
 on:
   push:
     branches:
-      - dev
+      - master
   workflow_dispatch:
 
 permissions:
@@ -27,7 +27,7 @@ jobs:
   build:
     name: Build & Push Image
     runs-on: ubuntu-latest
-    environment: dev
+    environment: master
 
     outputs:
       image_tag: ${{ steps.image.outputs.image_tag }}
@@ -87,7 +87,7 @@ jobs:
   deploy:
     name: Deploy to ECS
     runs-on: ubuntu-latest
-    environment: dev
+    environment: master
     needs: build
 
     steps:
